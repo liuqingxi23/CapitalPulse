@@ -1,0 +1,15 @@
+{
+  "name": "vane-sector-flow",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": ["frontend"],
+  "scripts": {
+    "dev": "bash start-all.sh",
+    "dev:web": "node frontend/node_modules/next/dist/bin/next dev frontend -p 3000",
+    "dev:api": "python -m uvicorn main:app --app-dir ./backend --reload --port 8000",
+    "build": "node frontend/node_modules/next/dist/bin/next build frontend",
+    "start": "node frontend/node_modules/next/dist/bin/next start frontend -p 3000",
+    "lint": "node frontend/node_modules/eslint/bin/eslint.js --config frontend/eslint.config.mjs frontend/src frontend/next.config.ts",
+    "test:api": "python -c \"import os,sys,unittest; os.chdir('backend'); sys.path.insert(0,'.'); result=unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.discover('tests')); raise SystemExit(not result.wasSuccessful())\""
+  }
+}

@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
+  <defs>
+    <linearGradient id="background" x1="4" y1="3" x2="28" y2="29" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1E3A8A"/>
+      <stop offset="1" stop-color="#0F172A"/>
+    </linearGradient>
+    <filter id="endpoint-glow" x="21" y="2" width="11" height="11" filterUnits="userSpaceOnUse">
+      <feGaussianBlur stdDeviation="1.15"/>
+    </filter>
+  </defs>
+
+  <rect width="32" height="32" rx="8" fill="url(#background)"/>
+
+  <g opacity="0.16" stroke="#E2E8F0" stroke-width="0.75">
+    <path d="M5 9.5H27"/>
+    <path d="M5 16H27"/>
+    <path d="M5 22.5H27"/>
+  </g>
+
+  <path
+    d="M4.5 22.5C7.3 22.2 8.6 16.4 11.3 16.8C14 17.2 14.5 20.3 17.2 18.8C20.2 17.1 21 10.2 24 9.2C25.4 8.7 26.5 8.4 27.5 7.4"
+    stroke="#FB7185"
+    stroke-width="2.35"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M4.5 9.2C7.1 9.6 8.4 13.3 11 12.8C13.5 12.4 14.8 10.7 17.3 12.2C19.8 13.7 20.8 18.8 23.7 20C25 20.6 26.3 20.9 27.5 21.5"
+    stroke="#34D399"
+    stroke-width="2.15"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+
+  <circle cx="27.5" cy="7.4" r="3.3" fill="#FB7185" opacity="0.38" filter="url(#endpoint-glow)"/>
+  <circle cx="27.5" cy="7.4" r="2.15" fill="#FFF1F2"/>
+  <circle cx="27.5" cy="7.4" r="1.25" fill="#F43F5E"/>
+  <circle cx="27.5" cy="21.5" r="1.75" fill="#D1FAE5"/>
+  <circle cx="27.5" cy="21.5" r="1" fill="#10B981"/>
+</svg>
