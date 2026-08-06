@@ -89,6 +89,42 @@ type DailyHistoryData = {
   series: DailySectorSeries[]
 }
 
+type StockSearchResult = {
+  quote_id: string
+  code: string
+  name: string
+  market_name: string
+  pinyin: string
+}
+
+const DEFAULT_STOCK: StockSearchResult = {
+  quote_id: '0.000001',
+  code: '000001',
+  name: '平安银行',
+  market_name: '深A',
+  pinyin: 'PAYH',
+}
+const STOCK_SELECTION_STORAGE_KEY = 'capitalpulse.stock-flow.selection'
+
+type StockFlowSession = {
+  runtime_id: string
+  default_stock: StockSearchResult
+}
+
+type StockFlowHistory = {
+  runtime_id: string
+  trade_date: string
+  stock: { quote_id: string; code: string; name: string }
+  points: DetailPoint[]
+  poll_seconds: number
+  market_status: ServiceStatus['market_status']
+}
+
+type StockSocketMessage =
+  | { type: 'snapshot'; data: StockFlowHistory }
+  | { type: 'update'; data: Flow & { quote_id: string; code: string; name: string } }
+  | { type: 'status' | 'heartbeat'; data: { market_status: ServiceStatus['market_status'] } }
+
 function mergeDailyHistory(
   current: DailyHistoryData | null,
   incoming: DailyHistoryData,
@@ -114,7 +150,7 @@ function mergeDailyHistory(
   }
 }
 
-type ChartMode = 'main' | 'detail' | 'daily'
+type ChartMode = 'main' | 'detail' | 'daily' | 'stock'
 
 type ServiceStatus = {
   market_status: 'preopen' | 'open' | 'lunch' | 'closed' | 'stale' | 'error'
@@ -160,9 +196,9 @@ const FLOW_METRICS = [
 ] as const
 
 const DETAIL_METRICS = [
-  { key: 'main_net', label: '主力', pointIndex: 1, color: '#475569' },
-  { key: 'super_large_net', label: '超大单', pointIndex: 2, color: '#dc2626' },
-  { key: 'large_net', label: '大单', pointIndex: 3, color: '#f97316' },
+  { key: 'main_net', label: '主力', pointIndex: 1, color: '#dc2626' },
+  { key: 'super_large_net', label: '超大单', pointIndex: 2, color: '#f97316' },
+  { key: 'large_net', label: '大单', pointIndex: 3, color: '#eab308' },
   { key: 'mid_net', label: '中单', pointIndex: 4, color: '#2563eb' },
   { key: 'small_net', label: '小单', pointIndex: 5, color: '#16a34a' },
 ] as const
@@ -220,6 +256,39 @@ function tradingAxisLabel(value: number): string {
   return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`
 }
 
+function spreadEndpointLabels(
+  entries: Array<{ key: string; desired: number }>,
+  yMin: number,
+  yMax: number,
+  minimumGapRatio: number,
+): Map<string, number> {
+  const ordered = [...entries].sort((left, right) => left.desired - right.desired)
+  if (ordered.length === 0) return new Map()
+  const span = Math.max(yMax - yMin, 1)
+  const gap = Math.min(
+    span * minimumGapRatio,
+    ordered.length <= 1 ? span : span / (ordered.length - 1),
+  )
+  const positions = ordered.map(({ desired }) => Math.min(yMax, Math.max(yMin, desired)))
+
+  for (let index = 1; index < positions.length; index += 1) {
+    positions[index] = Math.max(positions[index], positions[index - 1] + gap)
+  }
+  if (positions[positions.length - 1] > yMax) {
+    const shift = positions[positions.length - 1] - yMax
+    for (let index = 0; index < positions.length; index += 1) positions[index] -= shift
+  }
+  for (let index = positions.length - 2; index >= 0; index -= 1) {
+    positions[index] = Math.min(positions[index], positions[index + 1] - gap)
+  }
+  if (positions[0] < yMin) {
+    const shift = yMin - positions[0]
+    for (let index = 0; index < positions.length; index += 1) positions[index] += shift
+  }
+
+  return new Map(ordered.map((entry, index) => [entry.key, positions[index]]))
+}
+
 function chartAmount(value: unknown): number {
   if (Array.isArray(value)) return Number(value[1] ?? 0)
   return Number(value ?? 0)
@@ -239,6 +308,20 @@ function socketUrl(): string {
   }
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   return `${protocol}//${window.location.hostname}:8000/ws/sector-flow`
+}
+
+function stockSocketUrl(stock: StockSearchResult): string {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  const configured = process.env.NEXT_PUBLIC_SECTOR_FLOW_WS_URL
+  const url = configured
+    ? new URL(configured)
+    : new URL(`${protocol}//${window.location.hostname}:8000/ws/stock-flow`)
+  url.pathname = '/ws/stock-flow'
+  url.search = ''
+  url.searchParams.set('quote_id', stock.quote_id)
+  url.searchParams.set('code', stock.code)
+  url.searchParams.set('name', stock.name)
+  return url.toString()
 }
 
 function statusLabel(status: ServiceStatus['market_status']): string {
@@ -364,12 +447,32 @@ function DetailSectorChart({
 
   const option = useMemo<EChartsOption>(() => {
     const chartSeries: Array<LineSeriesOption | ScatterSeriesOption | EffectScatterSeriesOption> = []
-
-    DETAIL_METRICS.forEach((metric, metricIndex) => {
+    const preparedMetrics = DETAIL_METRICS.map((metric) => {
       const values = sector.points.flatMap((point) => {
         const offset = tradingTimeOffset(point[0])
         return offset === null ? [] : [[offset, point[metric.pointIndex] / 1e8, point[0]]]
       })
+      const endpoint = values.at(-1)
+      return { metric, values, endpoint, latest: Number(endpoint?.[1] ?? 0) }
+    })
+    const plottedAmounts = preparedMetrics.flatMap(({ values }) => (
+      values.map((value) => Number(value[1]))
+    ))
+    const dataMin = Math.min(0, ...plottedAmounts)
+    const dataMax = Math.max(0, ...plottedAmounts)
+    const dataSpan = Math.max(dataMax - dataMin, Math.abs(dataMax) * 0.2, Math.abs(dataMin) * 0.2, 1)
+    const yMin = dataMin - dataSpan * 0.16
+    const yMax = dataMax + dataSpan * 0.16
+    const labelYByKey = spreadEndpointLabels(
+      preparedMetrics
+        .filter(({ endpoint }) => endpoint)
+        .map(({ metric, latest }) => ({ key: metric.key, desired: latest })),
+      yMin,
+      yMax,
+      0.085,
+    )
+
+    preparedMetrics.forEach(({ metric, values, endpoint, latest }, metricIndex) => {
       chartSeries.push({
         id: `${sector.sector_code}-${metric.key}`,
         name: metric.label,
@@ -391,8 +494,35 @@ function DetailSectorChart({
         } : undefined,
       })
 
-      const endpoint = values.at(-1)
       if (!endpoint) return
+      const labelY = labelYByKey.get(metric.key) ?? latest
+      chartSeries.push({
+        id: `${sector.sector_code}-${metric.key}-endpoint-label`,
+        name: `${metric.label} endpoint label`,
+        type: 'scatter',
+        data: [[endpoint[0], labelY, endpoint[2]]],
+        encode: { x: 0, y: 1 },
+        symbol: 'circle',
+        symbolSize: 1,
+        clip: false,
+        silent: true,
+        tooltip: { show: false },
+        z: 5,
+        itemStyle: { opacity: 0 },
+        label: {
+          show: true,
+          opacity: 1,
+          position: 'right',
+          distance: 5,
+          verticalAlign: 'middle',
+          color: metric.color,
+          fontSize: 10,
+          fontWeight: 600,
+          lineHeight: 14,
+          formatter: () => `${latest >= 0 ? '+' : ''}${latest.toFixed(2)}亿`,
+        },
+        labelLayout: { hideOverlap: false },
+      })
       chartSeries.push({
         id: `${sector.sector_code}-${metric.key}-endpoint`,
         name: `${metric.label} endpoint`,
@@ -428,7 +558,7 @@ function DetailSectorChart({
       animation: true,
       animationDuration: 0,
       animationDurationUpdate: 300,
-      grid: { left: 44, right: 18, top: 18, bottom: 36, containLabel: true },
+      grid: { left: 44, right: 84, top: 22, bottom: 36, containLabel: true },
       tooltip: {
         trigger: 'axis',
         confine: true,
@@ -465,6 +595,8 @@ function DetailSectorChart({
       },
       yAxis: {
         type: 'value',
+        min: yMin,
+        max: yMax,
         name: '净流入（亿元）',
         nameLocation: 'middle',
         nameRotate: 90,
@@ -502,12 +634,216 @@ function DetailSectorChart({
   return (
     <article className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
       <div className="flex items-center justify-between border-b border-slate-100 px-3 py-2 dark:border-slate-800">
-        <h3 className="truncate text-sm font-medium">{sector.rank}. {displayName(sector.sector_name)}</h3>
+        <h3 className="truncate text-sm font-medium">{displayName(sector.sector_name)}</h3>
         <span className="font-mono text-[11px] text-slate-400">{sector.sector_code}</span>
       </div>
       <div ref={containerRef} className="h-[250px] w-full xl:min-h-0 xl:flex-1" aria-label={`${displayName(sector.sector_name)}细分资金流向曲线`} />
     </article>
   )
+}
+
+function StockFlowChart({
+  data,
+  flashing,
+}: {
+  data: StockFlowHistory
+  flashing: boolean
+}) {
+  const containerRef = useRef<HTMLDivElement | null>(null)
+  const chartRef = useRef<ECharts | null>(null)
+
+  const option = useMemo<EChartsOption>(() => {
+    const chartSeries: Array<LineSeriesOption | ScatterSeriesOption | EffectScatterSeriesOption> = []
+    const preparedMetrics = DETAIL_METRICS.map((metric) => {
+      const values = data.points.flatMap((point) => {
+        const offset = tradingTimeOffset(point[0])
+        return offset === null ? [] : [[offset, point[metric.pointIndex] / 1e8, point[0]]]
+      })
+      const endpoint = values.at(-1)
+      return { metric, values, endpoint, latest: Number(endpoint?.[1] ?? 0) }
+    })
+    const plottedAmounts = preparedMetrics.flatMap(({ values }) => (
+      values.map((value) => Number(value[1]))
+    ))
+    const dataMin = Math.min(0, ...plottedAmounts)
+    const dataMax = Math.max(0, ...plottedAmounts)
+    const dataSpan = Math.max(dataMax - dataMin, Math.abs(dataMax) * 0.2, Math.abs(dataMin) * 0.2, 1)
+    const yMin = dataMin - dataSpan * 0.12
+    const yMax = dataMax + dataSpan * 0.12
+    const labelYByKey = spreadEndpointLabels(
+      preparedMetrics
+        .filter(({ endpoint }) => endpoint)
+        .map(({ metric, latest }) => ({ key: metric.key, desired: latest })),
+      yMin,
+      yMax,
+      0.04,
+    )
+
+    preparedMetrics.forEach(({ metric, values, endpoint, latest }, metricIndex) => {
+      chartSeries.push({
+        id: `stock-${data.stock.quote_id}-${metric.key}`,
+        name: metric.label,
+        type: 'line',
+        data: values,
+        encode: { x: 0, y: 1 },
+        showSymbol: false,
+        sampling: 'lttb',
+        animationDurationUpdate: 300,
+        lineStyle: {
+          width: metric.key === 'main_net' ? 2.4 : 1.7,
+          color: metric.color,
+          opacity: 0.92,
+        },
+        itemStyle: { color: metric.color },
+        emphasis: { focus: 'series', lineStyle: { width: 3.2 } },
+        markLine: metricIndex === 0 ? {
+          symbol: 'none',
+          silent: true,
+          lineStyle: { color: '#94a3b8', width: 1, opacity: 0.65 },
+          label: { show: false },
+          data: [{ yAxis: 0 }],
+        } : undefined,
+      })
+
+      if (!endpoint) return
+      const labelY = labelYByKey.get(metric.key) ?? latest
+      chartSeries.push({
+        id: `stock-${data.stock.quote_id}-${metric.key}-endpoint-label`,
+        name: `${metric.label} endpoint label`,
+        type: 'scatter',
+        data: [[endpoint[0], labelY, endpoint[2]]],
+        encode: { x: 0, y: 1 },
+        symbol: 'circle',
+        symbolSize: 1,
+        clip: false,
+        silent: true,
+        tooltip: { show: false },
+        z: 5,
+        itemStyle: { opacity: 0 },
+        label: {
+          show: true,
+          opacity: 1,
+          position: 'right',
+          distance: 6,
+          verticalAlign: 'middle',
+          color: metric.color,
+          fontSize: 11,
+          fontWeight: 600,
+          lineHeight: 16,
+          formatter: () => `${latest >= 0 ? '+' : ''}${latest.toFixed(2)}亿`,
+        },
+        labelLayout: { hideOverlap: false },
+      })
+      chartSeries.push({
+        id: `stock-${data.stock.quote_id}-${metric.key}-endpoint`,
+        name: `${metric.label} endpoint`,
+        type: 'scatter',
+        data: [endpoint],
+        encode: { x: 0, y: 1 },
+        symbol: 'circle',
+        symbolSize: 6,
+        silent: true,
+        tooltip: { show: false },
+        z: 4,
+        itemStyle: { color: metric.color, opacity: 0.65, borderWidth: 0 },
+      })
+      if (flashing) {
+        chartSeries.push({
+          id: `stock-${data.stock.quote_id}-${metric.key}-flash`,
+          name: `${metric.label} update`,
+          type: 'effectScatter',
+          data: [endpoint],
+          encode: { x: 0, y: 1 },
+          symbol: 'circle',
+          symbolSize: 6,
+          silent: true,
+          tooltip: { show: false },
+          z: 5,
+          itemStyle: { color: metric.color, opacity: 0.25 },
+          rippleEffect: { period: 1.2, scale: 1.8, brushType: 'stroke' },
+        })
+      }
+    })
+
+    return {
+      animation: true,
+      animationDuration: 0,
+      animationDurationUpdate: 300,
+      grid: { left: 60, right: 104, top: 28, bottom: 42, containLabel: true },
+      tooltip: {
+        trigger: 'axis',
+        confine: true,
+        renderMode: 'richText',
+        formatter: (params: unknown) => {
+          const items = (Array.isArray(params) ? params : [params]) as Array<{
+            seriesName?: string
+            value?: unknown
+          }>
+          const firstValue = items[0]?.value
+          const sourceTime = Array.isArray(firstValue) ? Number(firstValue[2] ?? 0) : 0
+          return [
+            sourceTime ? formatTime(sourceTime) : '--:--:--',
+            ...items.map((item) => {
+              const amount = chartAmount(item.value)
+              return `${item.seriesName ?? ''}  ${amount >= 0 ? '+' : ''}${amount.toFixed(2)}亿元`
+            }),
+          ].join('\n')
+        },
+      },
+      xAxis: {
+        type: 'value',
+        min: 0,
+        max: FULL_SESSION_SECONDS,
+        interval: 30 * 60,
+        axisLabel: {
+          color: '#94a3b8',
+          hideOverlap: true,
+          showMinLabel: true,
+          showMaxLabel: true,
+          formatter: (value: number) => tradingAxisLabel(value),
+        },
+        axisLine: { lineStyle: { color: '#cbd5e1' } },
+        splitLine: { show: false },
+      },
+      yAxis: {
+        type: 'value',
+        min: yMin,
+        max: yMax,
+        name: '累计净流入（亿元）',
+        nameLocation: 'middle',
+        nameRotate: 90,
+        nameGap: 48,
+        nameTextStyle: { color: '#94a3b8' },
+        axisLabel: { color: '#94a3b8', formatter: (value: number) => value.toFixed(1) },
+        splitLine: { lineStyle: { color: '#e2e8f0', opacity: 0.55 } },
+      },
+      series: chartSeries,
+    }
+  }, [data, flashing])
+
+  useEffect(() => {
+    let disposed = false
+    let observer: ResizeObserver | null = null
+    void import('echarts').then((echarts) => {
+      if (disposed || !containerRef.current) return
+      chartRef.current = echarts.init(containerRef.current, undefined, { renderer: 'canvas' })
+      chartRef.current.setOption(option, { notMerge: true, lazyUpdate: true })
+      observer = new ResizeObserver(() => chartRef.current?.resize())
+      observer.observe(containerRef.current)
+    })
+    return () => {
+      disposed = true
+      observer?.disconnect()
+      chartRef.current?.dispose()
+      chartRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
+    chartRef.current?.setOption(option, { notMerge: true, lazyUpdate: true })
+  }, [option])
+
+  return <div ref={containerRef} className="absolute inset-0" aria-label={`${data.stock.name}秒级实时资金流向曲线`} />
 }
 
 function DailySectorChart({ sector }: { sector: DailySectorSeries }) {
@@ -625,7 +961,7 @@ function DailySectorChart({ sector }: { sector: DailySectorSeries }) {
   return (
     <article className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
       <div className="flex items-center justify-between border-b border-slate-100 px-3 py-2 dark:border-slate-800">
-        <h3 className="truncate text-sm font-medium">{sector.rank}. {displayName(sector.sector_name)}</h3>
+        <h3 className="truncate text-sm font-medium">{displayName(sector.sector_name)}</h3>
         <span className="font-mono text-[11px] text-slate-400">{sector.sector_code}</span>
       </div>
       <div ref={containerRef} className="h-[250px] w-full xl:min-h-0 xl:flex-1" aria-label={`${displayName(sector.sector_name)}最近30日主力资金柱状图`} />
@@ -638,8 +974,11 @@ export default function SectorFlowPage() {
   const chartRef = useRef<ECharts | null>(null)
   const chartOptionRef = useRef<EChartsOption>({})
   const socketRef = useRef<WebSocket | null>(null)
+  const stockSocketRef = useRef<WebSocket | null>(null)
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const stockReconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const endpointFlashTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const stockFlashTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const reconnectAttempts = useRef(0)
   const latestFlowsRef = useRef<Flow[]>([])
   const [history, setHistory] = useState<HistoryData>({
@@ -661,6 +1000,77 @@ export default function SectorFlowPage() {
   const [dailyPages, setDailyPages] = useState<Record<number, DailyHistoryData>>({})
   const [dailyLoadingPage, setDailyLoadingPage] = useState<number | null>(null)
   const [dailyError, setDailyError] = useState<string | null>(null)
+  const [stockQuery, setStockQuery] = useState('')
+  const [stockSearchResults, setStockSearchResults] = useState<StockSearchResult[]>([])
+  const [stockSearching, setStockSearching] = useState(false)
+  const [stockSearchError, setStockSearchError] = useState<string | null>(null)
+  const [selectedStock, setSelectedStock] = useState<StockSearchResult | null>(null)
+  const [stockRuntimeId, setStockRuntimeId] = useState<string | null>(null)
+  const [stockSelectionReady, setStockSelectionReady] = useState(false)
+  const [stockHistory, setStockHistory] = useState<StockFlowHistory | null>(null)
+  const [stockMarketStatus, setStockMarketStatus] = useState<ServiceStatus['market_status']>('closed')
+  const [stockError, setStockError] = useState<string | null>(null)
+  const [stockFlashing, setStockFlashing] = useState(false)
+
+  useEffect(() => {
+    const controller = new AbortController()
+
+    const restoreStockSelection = async () => {
+      try {
+        const response = await fetch('/api/finance/stock-flow/session', {
+          cache: 'no-store',
+          signal: controller.signal,
+        })
+        const payload = await response.json()
+        if (!response.ok || payload.code !== 200 || !payload.data) {
+          throw new Error(payload.msg || '个股运行状态加载失败')
+        }
+        const session = payload.data as StockFlowSession
+        let restoredStock = session.default_stock?.quote_id
+          ? session.default_stock
+          : DEFAULT_STOCK
+        try {
+          const cachedText = window.localStorage.getItem(STOCK_SELECTION_STORAGE_KEY)
+          const cached = cachedText
+            ? JSON.parse(cachedText) as { runtime_id?: string; stock?: StockSearchResult }
+            : null
+          if (
+            cached?.runtime_id === session.runtime_id
+            && cached.stock?.quote_id
+            && cached.stock.code
+            && cached.stock.name
+          ) {
+            restoredStock = cached.stock
+          }
+        } catch {
+          // A malformed or unavailable browser cache falls back to the default stock.
+        }
+        if (!controller.signal.aborted) {
+          setStockRuntimeId(session.runtime_id)
+          setSelectedStock(restoredStock)
+        }
+      } catch {
+        if (!controller.signal.aborted) setSelectedStock(DEFAULT_STOCK)
+      } finally {
+        if (!controller.signal.aborted) setStockSelectionReady(true)
+      }
+    }
+
+    void restoreStockSelection()
+    return () => controller.abort()
+  }, [])
+
+  useEffect(() => {
+    if (!stockSelectionReady || !stockRuntimeId || !selectedStock) return
+    try {
+      window.localStorage.setItem(STOCK_SELECTION_STORAGE_KEY, JSON.stringify({
+        runtime_id: stockRuntimeId,
+        stock: selectedStock,
+      }))
+    } catch {
+      // Browsers with disabled storage still keep the in-memory selection.
+    }
+  }, [selectedStock, stockRuntimeId, stockSelectionReady])
 
   const fetchHistory = useCallback(async () => {
     try {
@@ -835,6 +1245,155 @@ export default function SectorFlowPage() {
 
     return () => controller.abort()
   }, [chartMode, dailyPage, dailyPages])
+
+  useEffect(() => {
+    if (chartMode !== 'stock') return
+    const keyword = stockQuery.trim()
+    if (!keyword) {
+      setStockSearchResults([])
+      setStockSearchError(null)
+      setStockSearching(false)
+      return
+    }
+    const controller = new AbortController()
+    setStockSearching(true)
+    setStockSearchError(null)
+    const timer = setTimeout(() => {
+      void fetch(`/api/finance/stock-flow/search?q=${encodeURIComponent(keyword)}`, {
+        cache: 'no-store',
+        signal: controller.signal,
+      })
+        .then(async (response) => {
+          const payload = await response.json()
+          if (!response.ok || payload.code !== 200 || !Array.isArray(payload.data)) {
+            throw new Error(payload.msg || '股票搜索失败')
+          }
+          setStockSearchResults(payload.data as StockSearchResult[])
+        })
+        .catch((error: unknown) => {
+          if (controller.signal.aborted) return
+          setStockSearchError(error instanceof Error ? error.message : '股票搜索失败')
+          setStockSearchResults([])
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) setStockSearching(false)
+        })
+    }, 300)
+
+    return () => {
+      clearTimeout(timer)
+      controller.abort()
+    }
+  }, [chartMode, stockQuery])
+
+  useEffect(() => {
+    if (chartMode !== 'stock' || !selectedStock) return
+    let disposed = false
+    let reconnectAttempts = 0
+
+    const flashStockEndpoints = () => {
+      setStockFlashing(true)
+      if (stockFlashTimer.current) clearTimeout(stockFlashTimer.current)
+      stockFlashTimer.current = setTimeout(() => {
+        setStockFlashing(false)
+        stockFlashTimer.current = null
+      }, 1200)
+    }
+
+    const connect = () => {
+      if (disposed) return
+      const socket = new WebSocket(stockSocketUrl(selectedStock))
+      stockSocketRef.current = socket
+      socket.onopen = () => {
+        reconnectAttempts = 0
+        setStockError(null)
+      }
+      socket.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data) as StockSocketMessage
+          if (message.type === 'snapshot') {
+            if (
+              stockRuntimeId
+              && message.data.runtime_id
+              && message.data.runtime_id !== stockRuntimeId
+            ) {
+              setStockRuntimeId(message.data.runtime_id)
+              setSelectedStock(DEFAULT_STOCK)
+              setStockHistory(null)
+              return
+            }
+            if (!stockRuntimeId && message.data.runtime_id) {
+              setStockRuntimeId(message.data.runtime_id)
+            }
+            setStockHistory(message.data)
+            setStockMarketStatus(message.data.market_status)
+          } else if (message.type === 'update') {
+            const point: DetailPoint = [
+              message.data.source_time,
+              message.data.main_net,
+              message.data.super_large_net,
+              message.data.large_net,
+              message.data.mid_net,
+              message.data.small_net,
+            ]
+            setStockHistory((current) => {
+              const next = current ?? {
+                runtime_id: stockRuntimeId ?? '',
+                trade_date: new Date().toISOString().slice(0, 10),
+                stock: {
+                  quote_id: selectedStock.quote_id,
+                  code: selectedStock.code,
+                  name: selectedStock.name,
+                },
+                points: [],
+                poll_seconds: 3,
+                market_status: 'open' as const,
+              }
+              const points = [...next.points]
+              const lastPoint = points.at(-1)
+              if (lastPoint?.[0] === point[0]) {
+                points[points.length - 1] = point
+              } else if (!lastPoint || point[0] > lastPoint[0]) {
+                points.push(point)
+              }
+              return { ...next, points, market_status: 'open' }
+            })
+            setStockMarketStatus('open')
+            flashStockEndpoints()
+          } else {
+            setStockMarketStatus(message.data.market_status)
+          }
+        } catch {
+          // A later valid snapshot or update recovers malformed messages.
+        }
+      }
+      socket.onclose = () => {
+        if (stockSocketRef.current === socket) stockSocketRef.current = null
+        if (disposed) return
+        setStockError('个股实时连接已断开，正在重连…')
+        const delay = Math.min(1000 * 2 ** reconnectAttempts, 15000)
+        reconnectAttempts += 1
+        stockReconnectTimer.current = setTimeout(connect, delay)
+      }
+      socket.onerror = () => socket.close()
+    }
+
+    connect()
+    return () => {
+      disposed = true
+      if (stockReconnectTimer.current) clearTimeout(stockReconnectTimer.current)
+      if (stockFlashTimer.current) clearTimeout(stockFlashTimer.current)
+      stockReconnectTimer.current = null
+      stockFlashTimer.current = null
+      const socket = stockSocketRef.current
+      stockSocketRef.current = null
+      if (socket) {
+        socket.onclose = null
+        socket.close()
+      }
+      setStockFlashing(false)
+    }
+  }, [chartMode, selectedStock, stockRuntimeId])
 
   useEffect(() => {
     let disposed = false
@@ -1084,6 +1643,7 @@ export default function SectorFlowPage() {
     .flatMap((series) => series.points.at(-1)?.[0] ?? [])
     .sort()
     .at(-1)
+  const stockLastTime = stockHistory?.points.at(-1)?.[0] ?? null
   const reloadDailyPage = () => {
     setDailyError(null)
     setDailyPages((pages) => {
@@ -1096,7 +1656,9 @@ export default function SectorFlowPage() {
     ? detailError
     : chartMode === 'daily'
       ? dailyError
-      : null
+      : chartMode === 'stock'
+        ? stockError
+        : null
   const isDelayed = history.status.market_status === 'stale'
     || (history.status.market_status === 'open'
       && !!history.status.last_source_time
@@ -1193,6 +1755,18 @@ export default function SectorFlowPage() {
                 >
                   30日主力流向
                 </button>
+                <button
+                  type="button"
+                  onClick={() => setChartMode('stock')}
+                  aria-pressed={chartMode === 'stock'}
+                  className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                    chartMode === 'stock'
+                      ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-700 dark:text-white'
+                      : 'text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white'
+                  }`}
+                >
+                  个股资金流向
+                </button>
               </div>
               <div className="min-w-0 text-right">
                 <h2 className="font-medium">
@@ -1200,9 +1774,11 @@ export default function SectorFlowPage() {
                     ? '主力资金累计曲线'
                     : chartMode === 'detail'
                       ? '行业细分资金流向'
-                      : '30日主力资金流向曲线'}
+                      : chartMode === 'daily'
+                        ? '30日主力资金流向曲线'
+                        : '个股实时资金流向'}
                 </h2>
-                {chartMode !== 'detail' ? (
+                {chartMode === 'main' || chartMode === 'daily' ? (
                   <div className="mt-1 flex flex-wrap items-center justify-end gap-3 text-xs text-slate-500">
                     <span className="flex items-center gap-1"><span className="size-2 rounded-full bg-red-600" />净流入</span>
                     <span className="flex items-center gap-1"><span className="size-2 rounded-full bg-emerald-600" />净流出</span>
@@ -1223,7 +1799,9 @@ export default function SectorFlowPage() {
                     ))}
                     <span className="flex items-center gap-1">
                       <Clock3 className="size-3" />
-                      {formatTime(history.status.last_source_time)}
+                      {chartMode === 'detail'
+                        ? formatTime(history.status.last_source_time)
+                        : `${formatTime(stockLastTime)} · ${statusLabel(stockMarketStatus)}`}
                     </span>
                   </div>
                 )}
@@ -1247,7 +1825,7 @@ export default function SectorFlowPage() {
             {chartMode === 'detail' && (
               <div className="flex h-[480px] min-h-[420px] flex-col bg-slate-50 sm:h-[560px] lg:h-[640px] dark:bg-slate-950/40">
                 <div className="border-b border-slate-200 px-4 py-2.5 text-xs text-slate-500 dark:border-slate-800">
-                  第 {detailRangeStart || '--'}–{detailRangeEnd || '--'} / Top {detailTotalItems || 30} 行业
+                  {detailRangeStart || '--'}–{detailRangeEnd || '--'} / {detailTotalItems || 30} 行业
                 </div>
 
                 <div className="min-h-0 flex-1 overflow-y-auto">
@@ -1313,7 +1891,7 @@ export default function SectorFlowPage() {
             {chartMode === 'daily' && (
               <div className="relative flex h-[480px] min-h-[420px] flex-col bg-slate-50 sm:h-[560px] lg:h-[640px] dark:bg-slate-950/40">
                 <div className="border-b border-slate-200 px-4 py-2.5 text-xs text-slate-500 dark:border-slate-800">
-                  第 {dailyRangeStart || '--'}–{dailyRangeEnd || '--'} / Top {dailyTotalItems || 30} 行业
+                  {dailyRangeStart || '--'}–{dailyRangeEnd || '--'} / {dailyTotalItems || 30} 行业
                 </div>
 
                 <div className="relative min-h-0 flex-1 overflow-y-auto">
@@ -1385,6 +1963,89 @@ export default function SectorFlowPage() {
                   >
                     下一页<ChevronRight className="size-3.5" />
                   </button>
+                </div>
+              </div>
+            )}
+
+            {chartMode === 'stock' && (
+              <div className="flex h-[480px] min-h-[420px] flex-col bg-slate-50 sm:h-[560px] lg:h-[640px] dark:bg-slate-950/40">
+                <div className="flex flex-wrap items-center gap-3 border-b border-slate-200 px-4 py-3 dark:border-slate-800">
+                  <div className="relative min-w-[240px] flex-1 sm:max-w-md">
+                    <input
+                      type="search"
+                      value={stockQuery}
+                      onChange={(event) => setStockQuery(event.target.value)}
+                      placeholder="输入股票名称或代码，例如：贵州茅台 / 600519"
+                      className="h-9 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm outline-none transition focus:border-slate-500 focus:ring-2 focus:ring-slate-200 dark:border-slate-700 dark:bg-slate-900 dark:focus:border-slate-500 dark:focus:ring-slate-800"
+                      aria-label="搜索股票名称或代码"
+                    />
+                    {stockQuery.trim() && (
+                      <div className="absolute left-0 right-0 top-11 z-30 max-h-72 overflow-y-auto rounded-xl border border-slate-200 bg-white p-1 shadow-xl dark:border-slate-700 dark:bg-slate-900">
+                        {stockSearching && (
+                          <div className="flex items-center justify-center px-3 py-4 text-xs text-slate-500">
+                            <Radio className="mr-2 size-3.5 animate-pulse" />正在搜索股票…
+                          </div>
+                        )}
+                        {!stockSearching && stockSearchError && (
+                          <div className="px-3 py-4 text-center text-xs text-amber-600">{stockSearchError}</div>
+                        )}
+                        {!stockSearching && !stockSearchError && stockSearchResults.length === 0 && (
+                          <div className="px-3 py-4 text-center text-xs text-slate-500">未找到匹配的 A 股股票</div>
+                        )}
+                        {!stockSearching && stockSearchResults.map((stock) => (
+                          <button
+                            key={stock.quote_id}
+                            type="button"
+                            onClick={() => {
+                              setSelectedStock(stock)
+                              setStockHistory(null)
+                              setStockQuery('')
+                              setStockSearchResults([])
+                              setStockError(null)
+                            }}
+                            className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-slate-100 dark:hover:bg-slate-800"
+                          >
+                            <span className="font-medium">{stock.name}</span>
+                            <span className="font-mono text-xs text-slate-500">{stock.code} · {stock.market_name}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  {selectedStock ? (
+                    <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-900">
+                      <span className="font-medium">{selectedStock.name}</span>
+                      <span className="font-mono text-xs text-slate-500">{selectedStock.code}</span>
+                    </div>
+                  ) : (
+                    <span className="text-xs text-slate-500">选择股票后开始秒级采集</span>
+                  )}
+                </div>
+
+                <div className="relative min-h-0 flex-1">
+                  {selectedStock && stockHistory && stockHistory.points.length > 0 && (
+                    <StockFlowChart data={stockHistory} flashing={stockFlashing} />
+                  )}
+                  {!selectedStock && (
+                    <div className="absolute inset-0 flex items-center justify-center px-4 text-center text-sm text-slate-500">
+                      请搜索并选择一只股票，查看主力、超大单、大单、中单和小单的秒级累计资金流向。
+                    </div>
+                  )}
+                  {selectedStock && !stockHistory && (
+                    <div className="absolute inset-0 flex items-center justify-center text-sm text-slate-500">
+                      <Radio className="mr-2 size-4 animate-pulse" />正在连接 {selectedStock.name} 的实时资金数据…
+                    </div>
+                  )}
+                  {selectedStock && stockHistory && stockHistory.points.length === 0 && (
+                    <div className="absolute inset-0 flex items-center justify-center px-4 text-center text-sm text-slate-500">
+                      正在补全启动前的当日历史；盘中将按约 {stockHistory.poll_seconds} 秒持续采集。
+                    </div>
+                  )}
+                  {selectedStock && (
+                    <div className="absolute right-3 top-3 z-10 rounded-md bg-white/90 px-2 py-1 text-xs text-slate-500 shadow-sm dark:bg-slate-900/90">
+                      {statusLabel(stockMarketStatus)} · {formatTime(stockLastTime)}
+                    </div>
+                  )}
                 </div>
               </div>
             )}
