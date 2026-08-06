@@ -33,3 +33,8 @@ EASTMONEY_SECTOR_FLOW_SNAPSHOT_URL = (
 EASTMONEY_SECTOR_FLOW_SNAPSHOT_FALLBACK_URL = (
     "https://push2delay.eastmoney.com/api/qt/ulist.np/get"
 )
+EASTMONEY_STOCK_SEARCH_URL = "https://searchapi.eastmoney.com/api/suggest/get"
+EASTMONEY_STOCK_FLOW_SNAPSHOT_URL = "https://push2.eastmoney.com/api/qt/ulist.np/get"
+EASTMONEY_STOCK_FLOW_SNAPSHOT_FALLBACK_URL = (
+    "https://push2delay.eastmoney.com/api/qt/ulist.np/get"
+)

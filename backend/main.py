@@ -8,8 +8,9 @@ import uvicorn
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 
-from routers import sector_flow_realtime
+from routers import sector_flow_realtime, stock_flow_realtime
 from services.sector_flow_realtime import sector_flow_service
+from services.stock_flow_realtime import stock_flow_service
 from utils.http_client import close_client
 
 # Configure logging
@@ -26,8 +27,10 @@ async def lifespan(app: FastAPI):
     """Application lifespan: startup and shutdown."""
     logger.info("backend starting up...")
     await sector_flow_service.start()
+    await stock_flow_service.start()
     yield
     logger.info("backend shutting down...")
+    await stock_flow_service.stop()
     await sector_flow_service.stop()
     await close_client()
 
@@ -50,6 +53,7 @@ app.add_middleware(
 )
 
 app.include_router(sector_flow_realtime.router, prefix="/api", tags=["Real-time Sector Flow"])
+app.include_router(stock_flow_realtime.router, prefix="/api", tags=["Real-time Stock Flow"])
 
 
 # Health check endpoint
@@ -63,6 +67,17 @@ async def health_check():
 async def ws_sector_flow(websocket: WebSocket):
     """WebSocket endpoint for persistent sector-flow snapshots."""
     await sector_flow_service.websocket_handler(websocket)
+
+
+@app.websocket("/ws/stock-flow")
+async def stock_flow_ws(
+    websocket: WebSocket,
+    quote_id: str,
+    code: str = "",
+    name: str = "",
+):
+    """Subscribe to one stock's persistent second-level fund-flow snapshots."""
+    await stock_flow_service.websocket_handler(websocket, quote_id, code, name)
 
 
 if __name__ == "__main__":
