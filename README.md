@@ -1,6 +1,6 @@
 # CapitalPulse
 
-行业板块实时资金流看板。项目采集行业板块资金流数据，通过实时曲线展示行业主力资金强弱，并提供主力、超大单、大单、中单和小单的行业细分资金流向。
+A股行业板块、个股资金流向看板。采集行业板块以及个股的资金流数据，实时展示主力、超大单、大单、中单和小单的资金流向情况。
 
 ## 界面预览
 
@@ -12,26 +12,6 @@
 - 行业及个股资金流向分析
 - 实时与历史数据可视化
 - 本地数据持久化
-- 响应式界面与深浅色主题
-
-## 技术栈
-
-### 前端
-
-- Next.js 16
-- React 19
-- TypeScript
-- Tailwind CSS 4
-- Apache ECharts 5
-- Lucide React
-
-### 后端
-
-- Python 3.11+
-- FastAPI
-- Uvicorn
-- HTTPX
-- SQLite
 
 ## 项目结构
 
@@ -96,32 +76,6 @@ bun --version
 
 以后重新打开终端时，只需进入项目根目录并执行 `conda activate capitalpulse`，不需要重复安装依赖。
 
-## 配置
-
-项目内提供了以下示例配置：
-
-- `backend/.env.example`
-- `frontend/.env.example`
-
-后端配置项：
-
-| 变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `SECTOR_FLOW_ENABLED` | `true` | 是否启用行业资金采集 |
-| `SECTOR_FLOW_POLL_SECONDS` | `3` | 交易时段轮询间隔，单位为秒 |
-| `STOCK_FLOW_POLL_SECONDS` | `3` | 已订阅个股的实时资金轮询间隔，单位为秒 |
-| `SECTOR_FLOW_DB_PATH` | `backend/data/sector_flow_realtime.sqlite3` | SQLite 数据库路径 |
-| `SECTOR_FLOW_RETENTION_DAYS` | `30` | 数据保留天数 |
-
-前端配置项：
-
-| 变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `VANE_API_URL` | `http://localhost:8000` | Next.js 服务端代理的后端地址 |
-| `NEXT_PUBLIC_SECTOR_FLOW_WS_URL` | 自动根据浏览器地址生成 | 可选的 WebSocket 公网地址 |
-
-本地开发使用默认值即可启动。部署时请通过运行环境注入后端变量，并将前端变量放入 `frontend/.env.local` 或部署平台的环境变量配置中。不要提交包含真实凭据的 `.env` 文件。
-
 ## 本地开发启动
 
 分别打开两个 Anaconda Prompt 或 Conda 终端，并进入项目根目录。
@@ -151,7 +105,7 @@ NEXT_PUBLIC_SECTOR_FLOW_WS_URL=wss://example.com/ws/sector-flow
 
 建议使用 Nginx、Caddy 或其他反向代理统一暴露 HTTPS，并确保 `/ws/sector-flow` 支持 WebSocket 升级。SQLite 数据库默认位于 `backend/data/sector_flow_realtime.sqlite3`，部署时应为该目录配置持久化存储和写权限。
 
-## 数据来源与风险提示
+## 风险提示
 
 本项目仅用于技术研究和数据展示，不保证数据的准确性、完整性与实时性，不构成任何投资建议。因使用本项目产生的交易、投资或其他损失，由使用者自行承担。
 
