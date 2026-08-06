@@ -4,7 +4,7 @@
 
 ## 界面预览
 
-![CapitalPulse 功能界面总览](frontend/image/overview.png)
+![CapitalPulse 功能界面总览](frontend/overview.png)
 
 ## 功能特性
 
@@ -154,7 +154,6 @@ NEXT_PUBLIC_SECTOR_FLOW_WS_URL=wss://example.com/ws/sector-flow
 ## 数据来源与风险提示
 
 本项目仅用于技术研究和数据展示，不保证数据的准确性、完整性与实时性，不构成任何投资建议。因使用本项目产生的交易、投资或其他损失，由使用者自行承担。
-
 
 ## License
 
